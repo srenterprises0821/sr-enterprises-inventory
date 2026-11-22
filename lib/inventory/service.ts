@@ -30,6 +30,14 @@ export const toProductDTO = (p: Row): ProductDTO => ({
 export const stockStatus = (stock: number, min: number) =>
   stock <= 0 ? 'out' : stock <= min ? 'lo' : 'ok';
 
+/**
+ * Callers may reference a product by its cuid (what the DTO exposes as `id`)
+ * or by its human-readable uniqueId (SR-CAT-00001). Accept both.
+ */
+const byAnyId = (ref: string): Prisma.ProductWhereInput => ({
+  OR: [{ id: ref }, { uniqueId: ref }]
+});
+
 export async function nextProductId(
   tx: Pick<typeof prisma, 'counter'>,
   cat: string
@@ -134,12 +142,12 @@ export async function createProduct(
 }
 
 export async function updateProduct(
-  uniqueId: string,
+  ref: string,
   input: ProductInput,
   userId: string
 ) {
-  const cur = await prisma.product.findUnique({
-    where: { uniqueId }
+  const cur = await prisma.product.findFirst({
+    where: byAnyId(ref)
   });
 
   if (!cur) {
@@ -192,9 +200,9 @@ export async function updateProduct(
   });
 }
 
-export async function deleteProduct(uniqueId: string) {
-  const cur = await prisma.product.findUnique({
-    where: { uniqueId },
+export async function deleteProduct(ref: string) {
+  const cur = await prisma.product.findFirst({
+    where: byAnyId(ref),
     select: { id: true }
   });
 
@@ -206,13 +214,25 @@ export async function deleteProduct(uniqueId: string) {
     );
   }
 
-  await prisma.product.delete({
-    where: { id: cur.id }
-  });
+  try {
+    await prisma.product.delete({
+      where: { id: cur.id }
+    });
+  } catch (e) {
+    // P2025: row vanished between lookup and delete (double click / stale tab).
+    // The product is gone, which is what the caller wanted.
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === 'P2025'
+    ) {
+      return;
+    }
+    throw e;
+  }
 }
 
 export async function adjustStock(
-  uniqueId: string,
+  ref: string,
   input: z.infer<typeof adjustSchema>,
   userId: string
 ) {
@@ -224,8 +244,8 @@ export async function adjustStock(
   };
 
   return prisma.$transaction(async (tx) => {
-    const cur = await tx.product.findUnique({
-      where: { uniqueId }
+    const cur = await tx.product.findFirst({
+      where: byAnyId(ref)
     });
 
     if (!cur) {
@@ -324,9 +344,6 @@ export async function listProducts(
       .trim()
       .replace(/[%_\\]/g, '\\$&')}%`;
 
-    // MySQL uses LIKE instead of PostgreSQL ILIKE.
-    // Case-insensitive behavior is normally provided by
-    // the MySQL database/table collation.
     w.push(
       Prisma.sql`(
         "name" ILIKE ${like}
